@@ -89,13 +89,6 @@ func parseFlags() (*options, error) {
 	return opts, nil
 }
 
-// 检查本地是否存在镜像
-func imageExists(image string) bool {
-	// 使用 docker inspect 检查镜像元数据，如果返回 0 说明本地已存在
-	cmd := exec.Command("docker", "inspect", "--type=image", image)
-	return cmd.Run() == nil
-}
-
 func run(opts *options) error {
 	if err := checkDocker(); err != nil {
 		return err
