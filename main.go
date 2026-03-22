@@ -24,6 +24,12 @@ type options struct {
 	verbose       bool
 }
 
+// 检查本地是否存在镜像
+func imageExists(image string) bool {
+	cmd := exec.Command("docker", "inspect", "--type=image", image)
+	return cmd.Run() == nil
+}
+
 func main() {
 	opts, err := parseFlags()
 	if err != nil {
@@ -47,8 +53,8 @@ func parseFlags() (*options, error) {
 	flag.StringVar(&opts.outputImage, "out-image", "", "输出镜像标签")
 	flag.StringVar(&opts.sourceDir, "src-dir", "", "源镜像中的项目目录，例如: /opt/project")
 	flag.StringVar(&opts.targetDir, "dst-dir", "", "写入目标镜像的目录，例如: /srv/app")
-	flag.StringVar(&opts.sourcePlat, "src-platform", "linux/amd64", "源镜像平台，支持别名: x86/amd64/amr/arm64")
-	flag.StringVar(&opts.targetPlat, "dst-platform", "linux/arm64", "目标镜像平台，支持别名: x86/amd64/amr/arm64")
+	flag.StringVar(&opts.sourcePlat, "src-platform", "linux/amd64", "源镜像平台，支持别名: x86/amd64/arm/arm64")
+	flag.StringVar(&opts.targetPlat, "dst-platform", "linux/arm64", "目标镜像平台，支持别名: x86/amd64/arm/arm64")
 	flag.BoolVar(&opts.keepContainer, "keep-container", false, "失败时保留临时容器用于排查")
 	flag.BoolVar(&opts.verbose, "v", true, "打印执行日志")
 
@@ -83,18 +89,47 @@ func parseFlags() (*options, error) {
 	return opts, nil
 }
 
+// 检查本地是否存在镜像
+func imageExists(image string) bool {
+	// 使用 docker inspect 检查镜像元数据，如果返回 0 说明本地已存在
+	cmd := exec.Command("docker", "inspect", "--type=image", image)
+	return cmd.Run() == nil
+}
+
 func run(opts *options) error {
 	if err := checkDocker(); err != nil {
 		return err
 	}
 
-	if err := dockerPull(opts.sourceImage, opts.sourcePlat, opts.verbose); err != nil {
-		return fmt.Errorf("拉取源镜像失败: %w", err)
-	}
-	if err := dockerPull(opts.targetImage, opts.targetPlat, opts.verbose); err != nil {
-		return fmt.Errorf("拉取目标镜像失败: %w", err)
+	// 1. 处理源镜像：本地优先策略
+	if imageExists(opts.sourceImage) {
+		if opts.verbose {
+			fmt.Printf("检测到本地源镜像: %s，跳过拉取阶段\n", opts.sourceImage)
+		}
+	} else {
+		if opts.verbose {
+			fmt.Printf("本地未找到源镜像，尝试从远程拉取: %s (%s)\n", opts.sourceImage, opts.sourcePlat)
+		}
+		if err := dockerPull(opts.sourceImage, opts.sourcePlat, opts.verbose); err != nil {
+			return fmt.Errorf("拉取源镜像失败: %w", err)
+		}
 	}
 
+	// 2. 处理目标基础镜像：本地优先策略
+	if imageExists(opts.targetImage) {
+		if opts.verbose {
+			fmt.Printf("检测到本地目标镜像: %s，跳过拉取阶段\n", opts.targetImage)
+		}
+	} else {
+		if opts.verbose {
+			fmt.Printf("本地未找到目标镜像，尝试从远程拉取: %s (%s)\n", opts.targetImage, opts.targetPlat)
+		}
+		if err := dockerPull(opts.targetImage, opts.targetPlat, opts.verbose); err != nil {
+			return fmt.Errorf("拉取目标镜像失败: %w", err)
+		}
+	}
+
+	// 3. 创建源容器（用于提取文件）
 	srcID, err := dockerCreate(opts.sourceImage, opts.sourcePlat)
 	if err != nil {
 		return fmt.Errorf("创建源容器失败: %w", err)
@@ -103,6 +138,7 @@ func run(opts *options) error {
 		defer dockerRm(srcID)
 	}
 
+	// 4. 创建目标容器（用于接收文件）
 	dstID, err := dockerCreate(opts.targetImage, opts.targetPlat)
 	if err != nil {
 		return fmt.Errorf("创建目标容器失败: %w", err)
@@ -111,18 +147,17 @@ func run(opts *options) error {
 		defer dockerRm(dstID)
 	}
 
+	// 5. 执行目录迁移
 	if opts.verbose {
-		fmt.Printf("导出目录: %s:%s\n", opts.sourceImage, opts.sourceDir)
-	}
-	if opts.verbose {
-		fmt.Printf("写入目录: %s:%s\n", opts.targetImage, opts.targetDir)
+		fmt.Printf("正在迁移目录: [%s]%s -> [%s]%s\n", opts.sourceImage, opts.sourceDir, opts.targetImage, opts.targetDir)
 	}
 	if err := streamProjectDir(srcID, sourceCopyPath(opts.sourceDir), dstID, opts.targetDir); err != nil {
 		return fmt.Errorf("目录迁移失败: %w", err)
 	}
 
+	// 6. 将修改后的目标容器提交为新镜像
 	if opts.verbose {
-		fmt.Printf("提交新镜像: %s\n", opts.outputImage)
+		fmt.Printf("正在生成新镜像: %s\n", opts.outputImage)
 	}
 	if err := dockerCommit(dstID, opts.outputImage); err != nil {
 		return fmt.Errorf("提交镜像失败: %w", err)
@@ -375,4 +410,3 @@ func toTarPath(p string) string {
 	p = path.Clean("/" + strings.TrimSpace(p))
 	return strings.TrimPrefix(p, "/")
 }
-
