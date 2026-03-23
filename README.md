@@ -10,7 +10,10 @@
 
 - Go 1.22+
 - Docker（服务端可用）
-
+### 注意
+go.mod 文件第一行开头的 BOM 字符（十六进制为 EF BB BF）。在 Go 语言中，如果 go.mod 文件包含了这个标记，编译器有时会报错，
+linux中需要mod中第一行
+```sed -i '1s/^\xef\xbb\xbf//' go.mod```
 ## 构建
 
 ```bash
